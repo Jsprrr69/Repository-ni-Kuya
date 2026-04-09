@@ -1,4 +1,4 @@
-# 📦 Streamlit App Starter Kit 
+# IoT-Based Fire Detection and Classification System with Automatic Breaker Isolation and Intelligent SMS Notification
 ```
 ⬆️ (Replace above with your app's name)
 ```
