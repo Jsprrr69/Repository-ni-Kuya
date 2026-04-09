@@ -4,7 +4,7 @@ import numpy as np
 import time
 
 # Optional: for serial (Arduino)
-import serial
+
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Fire Detection Dashboard", layout="wide")
