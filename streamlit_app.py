@@ -1,95 +1,172 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import time
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from components.footer import display_footer
+from datetime import timedelta, datetime
+from services.utils import get_risk_level_style
+from services.database import get_recent_readings_for_area
+from services.sms import check_for_sms, check_if_sent, send_sms, send_email
+import logging
 
-# Optional: for serial (Arduino)
+logger = logging.getLogger(__name__)
+
+# =====================================================
+# GET AREA FROM STATE OR URL PARAMS
+# =====================================================
+def get_area_from_state_or_params():
+    selected_area = None
+
+    if "selected_area" in st.session_state:
+        selected_area = st.session_state.selected_area
+    elif "area" in st.query_params:
+        selected_area = st.query_params["area"]
+
+    return selected_area
 
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Fire Detection Dashboard", layout="wide")
+# =====================================================
+# MAIN DASHBOARD
+# =====================================================
+selected_area = get_area_from_state_or_params()
 
-st.title("🔥 IoT Fire Detection and Classification System")
+if selected_area:
 
-# --- SIDEBAR ---
-st.sidebar.header("System Status")
-status_placeholder = st.sidebar.empty()
+    # Back button
+    if st.button("← Back to Visitor Page", type="secondary"):
+        st.switch_page("interfaces/visitor.py")
 
-# --- DATA STORAGE ---
-data = pd.DataFrame(columns=["MQ2","MQ7","MQ135","Temp","Status"])
+    # Title
+    _, area_col, _ = st.columns([1, 8, 1])
+    with area_col:
+        st.subheader(f"Showing data for {selected_area}")
 
-# --- OPTIONAL: SERIAL CONNECTION ---
-# Change COM port as needed
-# ser = serial.Serial('COM3', 9600)
+    # Containers
+    status_container = st.empty()
+    data_container = st.empty()
+    chart_container = st.empty()
 
-# --- SIMULATION FUNCTION (for testing) ---
-def get_sensor_data():
-    # Replace this with serial reading later
-    mq2 = np.random.randint(200,800)
-    mq7 = np.random.randint(150,700)
-    mq135 = np.random.randint(200,800)
-    temp = np.random.randint(25,100)
+    # =====================================================
+    # REAL-TIME UPDATE FUNCTION
+    # =====================================================
+    @st.fragment(run_every=st.session_state.get("refresh_rate", 1))
+    def update_sensor_data():
 
-    # Simple rule-based classification (replace with ML later)
-    if temp > 70 and mq2 > 500:
-        status = "FIRE"
-    elif mq2 > 400:
-        status = "SMOKE"
-    else:
-        status = "NORMAL"
+        df = get_recent_readings_for_area(selected_area)
 
-    return mq2, mq7, mq135, temp, status
+        if df is not None and not df.empty:
 
-# --- MAIN LOOP ---
-placeholder = st.empty()
+            # Remove area_name column if exists
+            if "area_name" in df.columns:
+                df = df.drop("area_name", axis=1)
 
-while True:
-    # --- GET DATA ---
-    mq2, mq7, mq135, temp, status = get_sensor_data()
+            # Latest reading
+            latest = df.iloc[0]
+            risk_level = latest["fire_risk"]
 
-    # --- APPEND DATA ---
-    new_row = {
-        "MQ2": mq2,
-        "MQ7": mq7,
-        "MQ135": mq135,
-        "Temp": temp,
-        "Status": status
-    }
+            # Style
+            style = get_risk_level_style(risk_level)
 
-    data = pd.concat([data, pd.DataFrame([new_row])], ignore_index=True)
+            # ================= STATUS DISPLAY =================
+            with status_container:
+                st.markdown(
+                    f"""
+                    <div style="background-color:{style['color']};
+                                padding:10px; border-radius:5px; margin-bottom:10px;">
+                        <h3 style="color:white; text-align:center;">
+                            {style['icon']} Current Status: {risk_level} {style['icon']}
+                        </h3>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-    # Keep last 50 rows only
-    data = data.tail(50)
+            # ================= TABLE DISPLAY =================
+            with data_container:
+                display_df = df.copy()
 
-    # --- DISPLAY ---
-    with placeholder.container():
+                column_mapping = {
+                    "timestamp": "Timestamp",
+                    "temperature_reading": "Temperature Level",
+                    "air_quality_reading": "Air Quality Level",
+                    "carbon_monoxide_reading": "Carbon Monoxide Level",
+                    "smoke_reading": "Smoke Level",
+                    "fire_risk": "Status"
+                }
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+                display_columns = {
+                    k: v for k, v in column_mapping.items()
+                    if k in display_df.columns
+                }
 
-        col1.metric("MQ2", mq2)
-        col2.metric("MQ7", mq7)
-        col3.metric("MQ135", mq135)
-        col4.metric("Temperature (°C)", temp)
-        col5.metric("Status", status)
+                display_df = display_df.rename(columns=display_columns)
 
-        # --- STATUS COLOR ---
-        if status == "FIRE":
-            st.error("🔥 FIRE DETECTED!")
-            status_placeholder.error("FIRE")
-        elif status == "SMOKE":
-            st.warning("⚠️ Smoke detected")
-            status_placeholder.warning("SMOKE")
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                # ================= NOTIFICATIONS =================
+                with st.expander("Notification Logs"):
+
+                    should_send_sms = check_for_sms(df)
+
+                    if should_send_sms:
+                        latest_risk = df.iloc[0]["fire_risk"]
+
+                        already_sent = check_if_sent(selected_area, latest_risk)
+
+                        if not already_sent:
+                            sms_result = send_sms(selected_area, latest_risk)
+
+                            if sms_result["sent"]:
+                                st.success(f"🚨 {latest_risk} detected! SMS sent.")
+
+                            elif sms_result.get("blocked_by_cooldown"):
+                                st.info("⏰ SMS not sent (cooldown active).")
+
+                            else:
+                                # Fallback email
+                                email_result = send_email(selected_area, latest_risk)
+
+                                if email_result["sent"]:
+                                    st.warning("📧 Email sent (SMS failed).")
+
+                                elif email_result.get("blocked_by_cooldown"):
+                                    st.info("⏰ Notifications blocked (cooldown).")
+
+                                else:
+                                    st.error("❌ SMS and Email both failed.")
+
+                        else:
+                            st.info("⏰ Already notified within last hour.")
+
+                    else:
+                        st.info("No fire risk pattern detected.")
+
         else:
-            st.success("✅ Normal condition")
-            status_placeholder.success("NORMAL")
+            with status_container:
+                st.error(f"No data available for {selected_area}")
 
-        # --- CHARTS ---
-        st.subheader("Sensor Trends")
+    # =====================================================
+    # SIDEBAR SETTINGS
+    # =====================================================
+    refresh_rate = st.sidebar.slider(
+        "Refresh rate (seconds)",
+        min_value=1.0,
+        max_value=60.0,
+        value=st.session_state.get("refresh_rate", 5.0),
+        step=1.0,
+        key="refresh_rate"
+    )
 
-        st.line_chart(data[["MQ2","MQ7","MQ135","Temp"]])
+    # Run updates
+    update_sensor_data()
 
-        # --- TABLE ---
-        st.subheader("Recent Data")
-        st.dataframe(data)
+else:
+    st.info("No area selected. Please click on an area from the main page.")
 
-    time.sleep(2)
+# Footer
+display_footer()
