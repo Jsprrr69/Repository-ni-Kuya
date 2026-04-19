@@ -1,28 +1,68 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from components.footer import display_footer
-from datetime import timedelta, datetime
-from services.utils import get_risk_level_style
-from services.database import get_recent_readings_for_area
-from services.sms import check_for_sms, check_if_sent, send_sms, send_email
-import logging
-
-logger = logging.getLogger(__name__)
+from datetime import datetime, timedelta
+import random
 
 # =====================================================
-# GET AREA FROM STATE OR URL PARAMS
+# MOCK FUNCTIONS (REPLACEMENTS)
+# =====================================================
+
+def get_recent_readings_for_area(area):
+    """Generate fake sensor data"""
+    now = datetime.now()
+
+    data = []
+    for i in range(20):
+        data.append({
+            "timestamp": now - timedelta(seconds=i * 5),
+            "temperature_reading": round(random.uniform(25, 60), 2),
+            "air_quality_reading": random.randint(100, 400),
+            "carbon_monoxide_reading": random.randint(50, 300),
+            "smoke_reading": random.randint(50, 500),
+            "fire_risk": random.choice(["LOW", "MEDIUM", "HIGH"])
+        })
+
+    return pd.DataFrame(data)
+
+
+def get_risk_level_style(risk):
+    styles = {
+        "LOW": {"color": "green", "icon": "✅"},
+        "MEDIUM": {"color": "orange", "icon": "⚠️"},
+        "HIGH": {"color": "red", "icon": "🚨"}
+    }
+    return styles.get(risk, styles["LOW"])
+
+
+def check_for_sms(df):
+    return df.iloc[0]["fire_risk"] == "HIGH"
+
+
+def check_if_sent(area, risk):
+    return False  # Always allow for testing
+
+
+def send_sms(area, risk):
+    return {"sent": True}
+
+
+def send_email(area, risk):
+    return {"sent": True}
+
+
+def display_footer():
+    st.markdown("---")
+    st.caption("SeekLiyab Fire Detection System Dashboard")
+
+
+# =====================================================
+# GET AREA
 # =====================================================
 def get_area_from_state_or_params():
-    selected_area = None
-
     if "selected_area" in st.session_state:
-        selected_area = st.session_state.selected_area
-    elif "area" in st.query_params:
-        selected_area = st.query_params["area"]
-
-    return selected_area
+        return st.session_state.selected_area
+    return "Area 1"  # Default for testing
 
 
 # =====================================================
@@ -30,142 +70,83 @@ def get_area_from_state_or_params():
 # =====================================================
 selected_area = get_area_from_state_or_params()
 
-if selected_area:
+st.title("🔥 Fire Detection Dashboard")
 
-    # Back button
-    if st.button("← Back to Visitor Page", type="secondary"):
-        st.switch_page("interfaces/visitor.py")
+# Containers
+status_container = st.empty()
+data_container = st.empty()
+chart_container = st.empty()
 
-    # Title
-    _, area_col, _ = st.columns([1, 8, 1])
-    with area_col:
-        st.subheader(f"Showing data for {selected_area}")
+# =====================================================
+# REAL-TIME UPDATE FUNCTION
+# =====================================================
+def update_sensor_data():
 
-    # Containers
-    status_container = st.empty()
-    data_container = st.empty()
-    chart_container = st.empty()
+    df = get_recent_readings_for_area(selected_area)
 
-    # =====================================================
-    # REAL-TIME UPDATE FUNCTION
-    # =====================================================
-    @st.fragment(run_every=st.session_state.get("refresh_rate", 1))
-    def update_sensor_data():
+    if df is not None and not df.empty:
 
-        df = get_recent_readings_for_area(selected_area)
+        latest = df.iloc[0]
+        risk_level = latest["fire_risk"]
+        style = get_risk_level_style(risk_level)
 
-        if df is not None and not df.empty:
+        # ================= STATUS =================
+        with status_container:
+            st.markdown(
+                f"""
+                <div style="background-color:{style['color']};
+                            padding:10px; border-radius:5px;">
+                    <h3 style="color:white; text-align:center;">
+                        {style['icon']} Current Status: {risk_level}
+                    </h3>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-            # Remove area_name column if exists
-            if "area_name" in df.columns:
-                df = df.drop("area_name", axis=1)
+        # ================= TABLE =================
+        with data_container:
+            st.dataframe(df, use_container_width=True)
 
-            # Latest reading
-            latest = df.iloc[0]
-            risk_level = latest["fire_risk"]
+        # ================= CHART =================
+        with chart_container:
+            fig = go.Figure()
 
-            # Style
-            style = get_risk_level_style(risk_level)
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"],
+                y=df["temperature_reading"],
+                name="Temperature"
+            ))
 
-            # ================= STATUS DISPLAY =================
-            with status_container:
-                st.markdown(
-                    f"""
-                    <div style="background-color:{style['color']};
-                                padding:10px; border-radius:5px; margin-bottom:10px;">
-                        <h3 style="color:white; text-align:center;">
-                            {style['icon']} Current Status: {risk_level} {style['icon']}
-                        </h3>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"],
+                y=df["smoke_reading"],
+                name="Smoke"
+            ))
 
-            # ================= TABLE DISPLAY =================
-            with data_container:
-                display_df = df.copy()
+            st.plotly_chart(fig, use_container_width=True)
 
-                column_mapping = {
-                    "timestamp": "Timestamp",
-                    "temperature_reading": "Temperature Level",
-                    "air_quality_reading": "Air Quality Level",
-                    "carbon_monoxide_reading": "Carbon Monoxide Level",
-                    "smoke_reading": "Smoke Level",
-                    "fire_risk": "Status"
-                }
+        # ================= NOTIFICATIONS =================
+        with st.expander("Notification Logs"):
+            if check_for_sms(df):
+                st.success("🚨 HIGH RISK detected! SMS sent.")
+            else:
+                st.info("No fire risk detected.")
 
-                display_columns = {
-                    k: v for k, v in column_mapping.items()
-                    if k in display_df.columns
-                }
+    else:
+        st.error("No data available")
 
-                display_df = display_df.rename(columns=display_columns)
 
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
+# =====================================================
+# REFRESH CONTROL
+# =====================================================
+refresh_rate = st.sidebar.slider(
+    "Refresh rate (seconds)",
+    1, 10, 2
+)
 
-                # ================= NOTIFICATIONS =================
-                with st.expander("Notification Logs"):
-
-                    should_send_sms = check_for_sms(df)
-
-                    if should_send_sms:
-                        latest_risk = df.iloc[0]["fire_risk"]
-
-                        already_sent = check_if_sent(selected_area, latest_risk)
-
-                        if not already_sent:
-                            sms_result = send_sms(selected_area, latest_risk)
-
-                            if sms_result["sent"]:
-                                st.success(f"🚨 {latest_risk} detected! SMS sent.")
-
-                            elif sms_result.get("blocked_by_cooldown"):
-                                st.info("⏰ SMS not sent (cooldown active).")
-
-                            else:
-                                # Fallback email
-                                email_result = send_email(selected_area, latest_risk)
-
-                                if email_result["sent"]:
-                                    st.warning("📧 Email sent (SMS failed).")
-
-                                elif email_result.get("blocked_by_cooldown"):
-                                    st.info("⏰ Notifications blocked (cooldown).")
-
-                                else:
-                                    st.error("❌ SMS and Email both failed.")
-
-                        else:
-                            st.info("⏰ Already notified within last hour.")
-
-                    else:
-                        st.info("No fire risk pattern detected.")
-
-        else:
-            with status_container:
-                st.error(f"No data available for {selected_area}")
-
-    # =====================================================
-    # SIDEBAR SETTINGS
-    # =====================================================
-    refresh_rate = st.sidebar.slider(
-        "Refresh rate (seconds)",
-        min_value=1.0,
-        max_value=60.0,
-        value=st.session_state.get("refresh_rate", 5.0),
-        step=1.0,
-        key="refresh_rate"
-    )
-
-    # Run updates
+# Auto refresh loop
+import time
+while True:
     update_sensor_data()
-
-else:
-    st.info("No area selected. Please click on an area from the main page.")
-
-# Footer
-display_footer()
+    time.sleep(refresh_rate)
